@@ -23,6 +23,9 @@ import {
 } from "./provider";
 import { getWalletsKit } from "../stellar";
 
+// Re-export type definitions for downstream modules
+export type { SigningResult, SigningRequest, SigningError } from "./provider";
+
 export interface SigningOptions {
   /** Wallet provider to use (if not specified, uses connected wallet) */
   provider?: WalletProviderType;

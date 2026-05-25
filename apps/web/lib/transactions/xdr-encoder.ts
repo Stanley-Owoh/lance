@@ -121,7 +121,7 @@ function isSorobanMap(arg: unknown): arg is SorobanMap {
  */
 export function addressToSoroban(address: string): SorobanAddress {
   // Validate that it's a valid Stellar address or contract ID
-  if (!StrKey.isValidEd25519PublicKey(address) && !StrKey.isValidContractId(address)) {
+  if (!StrKey.isValidEd25519PublicKey(address) && !StrKey.isValidContract(address)) {
     throw new Error(
       `Invalid Stellar address or contract ID: ${address}. ` +
         `Expected G... (account) or C... (contract).`,
@@ -262,19 +262,19 @@ export function createMap(
 export function encodeArgument(arg: SorobanArgument): xdr.ScVal {
   // Handle null
   if (arg === null) {
-    return xdr.ScVal.scValTypeVoid();
+    return xdr.ScVal.scvVoid();
   }
 
   // Handle boolean
   if (typeof arg === "boolean") {
-    return xdr.ScVal.scValTypeBool(arg);
+    return xdr.ScVal.scvBool(arg);
   }
 
   // Handle string (encoded as UTF-8 bytes)
   if (typeof arg === "string") {
     const encoder = new TextEncoder();
     const bytes = encoder.encode(arg);
-    return xdr.ScVal.scValTypeBytes(Buffer.from(bytes));
+    return xdr.ScVal.scvBytes(Buffer.from(bytes));
   }
 
   // Handle number (encoded as i64)
@@ -285,7 +285,7 @@ export function encodeArgument(arg: SorobanArgument): xdr.ScVal {
     if (arg < Number.MIN_SAFE_INTEGER || arg > Number.MAX_SAFE_INTEGER) {
       throw new Error(`Number out of safe integer range: ${arg}`);
     }
-    return xdr.ScVal.scValTypeI64(xdr.Int64.fromString(String(arg)));
+    return xdr.ScVal.scvI64(xdr.Int64.fromString(String(arg)));
   }
 
   // Handle bigint (encoded as i128 by default)
@@ -295,7 +295,7 @@ export function encodeArgument(arg: SorobanArgument): xdr.ScVal {
 
   // Handle Uint8Array (encoded as bytes)
   if (arg instanceof Uint8Array) {
-    return xdr.ScVal.scValTypeBytes(Buffer.from(arg));
+    return xdr.ScVal.scvBytes(Buffer.from(arg));
   }
 
   // Handle custom Soroban types
@@ -312,7 +312,7 @@ export function encodeArgument(arg: SorobanArgument): xdr.ScVal {
   }
 
   if (isSorobanBytes(arg)) {
-    return xdr.ScVal.scValTypeBytes(Buffer.from(arg.value));
+    return xdr.ScVal.scvBytes(Buffer.from(arg.value));
   }
 
   if (isSorobanVec(arg)) {
@@ -331,26 +331,7 @@ export function encodeArgument(arg: SorobanArgument): xdr.ScVal {
  * Converts the address string to the appropriate XDR Address type.
  */
 function encodeAddress(addr: SorobanAddress): xdr.ScVal {
-  const addressStr = addr.value;
-
-  // Determine if it's an account address or contract ID
-  if (StrKey.isValidEd25519PublicKey(addressStr)) {
-    // Account address (G...)
-    const publicKey = StrKey.decodeEd25519PublicKey(addressStr);
-    const accountId = xdr.AccountId.keyTypeEd25519(
-      xdr.Uint256.fromBuffer(Buffer.from(publicKey)),
-    );
-    const address = xdr.Address.addressTypeAccount(accountId);
-    return xdr.ScVal.scValTypeAddress(address);
-  } else if (StrKey.isValidContractId(addressStr)) {
-    // Contract ID (C...)
-    const contractIdBuffer = StrKey.decodeContractId(addressStr);
-    const contractId = xdr.Hash.fromBuffer(Buffer.from(contractIdBuffer));
-    const address = xdr.Address.addressTypeContract(contractId);
-    return xdr.ScVal.scValTypeAddress(address);
-  } else {
-    throw new Error(`Invalid address format: ${addressStr}`);
-  }
+  return new StellarAddress(addr.value).toScVal();
 }
 
 /**
@@ -366,12 +347,12 @@ function encodeI128(value: bigint): xdr.ScVal {
     ? hi - BigInt("0x10000000000000000")
     : hi;
 
-  const parts = xdr.Int128Parts.int128PartsHiLo(
-    xdr.Int64.fromString(hiSigned.toString()),
-    xdr.Uint64.fromString(lo.toString()),
-  );
+  const parts = new xdr.Int128Parts({
+    hi: xdr.Int64.fromString(hiSigned.toString()),
+    lo: xdr.Uint64.fromString(lo.toString()),
+  });
 
-  return xdr.ScVal.scValTypeI128(parts);
+  return xdr.ScVal.scvI128(parts);
 }
 
 /**
@@ -386,14 +367,14 @@ function encodeU256(value: bigint): xdr.ScVal {
   const mid_hi = (value >> BigInt(128)) & mask64;
   const hi = (value >> BigInt(192)) & mask64;
 
-  const parts = xdr.UInt256Parts.uint256PartsHiLoLoHi(
-    xdr.Uint64.fromString(hi.toString()),
-    xdr.Uint64.fromString(mid_hi.toString()),
-    xdr.Uint64.fromString(mid_lo.toString()),
-    xdr.Uint64.fromString(lo.toString()),
-  );
+  const parts = new xdr.UInt256Parts({
+    hiHi: xdr.Uint64.fromString(hi.toString()),
+    hiLo: xdr.Uint64.fromString(mid_hi.toString()),
+    loHi: xdr.Uint64.fromString(mid_lo.toString()),
+    loLo: xdr.Uint64.fromString(lo.toString()),
+  });
 
-  return xdr.ScVal.scValTypeU256(parts);
+  return xdr.ScVal.scvU256(parts);
 }
 
 /**
@@ -401,7 +382,7 @@ function encodeU256(value: bigint): xdr.ScVal {
  */
 function encodeVec(elements: SorobanArgument[]): xdr.ScVal {
   const encodedElements = elements.map((el) => encodeArgument(el));
-  return xdr.ScVal.scValTypeVec(encodedElements);
+  return xdr.ScVal.scvVec(encodedElements);
 }
 
 /**
@@ -409,10 +390,10 @@ function encodeVec(elements: SorobanArgument[]): xdr.ScVal {
  */
 function encodeMapType(entries: Array<[SorobanArgument, SorobanArgument]>): xdr.ScVal {
   const encodedEntries = entries.map(([key, value]) => {
-    return xdr.ScMapEntry.scMapEntry(encodeArgument(key), encodeArgument(value));
+    return new xdr.ScMapEntry({ key: encodeArgument(key), val: encodeArgument(value) });
   });
 
-  return xdr.ScVal.scValTypeMap(encodedEntries);
+  return xdr.ScVal.scvMap(encodedEntries);
 }
 
 /**
@@ -431,60 +412,60 @@ export function encodeArguments(args: SorobanArgument[]): xdr.ScVal[] {
  */
 export function decodeScVal(scVal: xdr.ScVal): unknown {
   switch (scVal.switch()) {
-    case xdr.ScValType.scValTypeVoid():
+    case xdr.ScValType.scvVoid():
       return null;
 
-    case xdr.ScValType.scValTypeBool():
+    case xdr.ScValType.scvBool():
       return scVal.b();
 
-    case xdr.ScValType.scValTypeI64():
+    case xdr.ScValType.scvI64():
       return BigInt(scVal.i64().toString());
 
-    case xdr.ScValType.scValTypeU64():
+    case xdr.ScValType.scvU64():
       return BigInt(scVal.u64().toString());
 
-    case xdr.ScValType.scValTypeI128(): {
+    case xdr.ScValType.scvI128(): {
       const parts = scVal.i128();
       const hi = BigInt(parts.hi().toString());
       const lo = BigInt(parts.lo().toString());
       return (hi << BigInt(64)) | lo;
     }
 
-    case xdr.ScValType.scValTypeU128(): {
+    case xdr.ScValType.scvU128(): {
       const parts = scVal.u128();
       const hi = BigInt(parts.hi().toString());
       const lo = BigInt(parts.lo().toString());
       return (hi << BigInt(64)) | lo;
     }
 
-    case xdr.ScValType.scValTypeU256(): {
+    case xdr.ScValType.scvU256(): {
       const parts = scVal.u256();
-      const hi = BigInt(parts.hi().toString());
-      const midHi = BigInt(parts.midHi().toString());
-      const midLo = BigInt(parts.midLo().toString());
-      const lo = BigInt(parts.lo().toString());
+      const hi = BigInt(parts.hiHi().toString());
+      const midHi = BigInt(parts.hiLo().toString());
+      const midLo = BigInt(parts.loHi().toString());
+      const lo = BigInt(parts.loLo().toString());
       return (hi << BigInt(192)) | (midHi << BigInt(128)) | (midLo << BigInt(64)) | lo;
     }
 
-    case xdr.ScValType.scValTypeI256(): {
+    case xdr.ScValType.scvI256(): {
       const parts = scVal.i256();
-      const hi = BigInt(parts.hi().toString());
-      const midHi = BigInt(parts.midHi().toString());
-      const midLo = BigInt(parts.midLo().toString());
-      const lo = BigInt(parts.lo().toString());
+      const hi = BigInt(parts.hiHi().toString());
+      const midHi = BigInt(parts.hiLo().toString());
+      const midLo = BigInt(parts.loHi().toString());
+      const lo = BigInt(parts.loLo().toString());
       return (hi << BigInt(192)) | (midHi << BigInt(128)) | (midLo << BigInt(64)) | lo;
     }
 
-    case xdr.ScValType.scValTypeBytes():
+    case xdr.ScValType.scvBytes():
       return scVal.bytes();
 
-    case xdr.ScValType.scValTypeString():
+    case xdr.ScValType.scvString():
       return scVal.str().toString();
 
-    case xdr.ScValType.scValTypeVec():
+    case xdr.ScValType.scvVec():
       return scVal.vec()?.map((el) => decodeScVal(el)) ?? [];
 
-    case xdr.ScValType.scValTypeMap():
+    case xdr.ScValType.scvMap():
       return (
         scVal.map()?.map((entry) => [
           decodeScVal(entry.key()),
@@ -492,15 +473,15 @@ export function decodeScVal(scVal: xdr.ScVal): unknown {
         ]) ?? []
       );
 
-    case xdr.ScValType.scValTypeAddress(): {
+    case xdr.ScValType.scvAddress(): {
       const addr = scVal.address();
-      if (addr.switch() === xdr.AddressType.addressTypeAccount()) {
+      if (addr.switch() === xdr.ScAddressType.scAddressTypeAccount()) {
         const accountId = addr.accountId();
         const publicKey = accountId.ed25519().toString("hex");
         return StrKey.encodeEd25519PublicKey(Buffer.from(publicKey, "hex"));
-      } else if (addr.switch() === xdr.AddressType.addressTypeContract()) {
+      } else if (addr.switch() === xdr.ScAddressType.scAddressTypeContract()) {
         const contractId = addr.contractId();
-        return StrKey.encodeContractId(contractId);
+        return StrKey.encodeContract(contractId);
       }
       return null;
     }

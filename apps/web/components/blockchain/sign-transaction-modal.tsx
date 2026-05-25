@@ -26,6 +26,8 @@ interface SignTransactionModalProps {
 }
 
 export function SignTransactionModal({ xdr, onConfirm, onCancel }: SignTransactionModalProps) {
+  const [isVisible, setIsVisible] = useState(false);
+
   const decoded = useMemo(() => {
     if (!xdr) return null;
     try {

@@ -77,7 +77,7 @@ export class SorobanTransactionBuilder {
     this.config = {
       rpcUrl: config.rpcUrl,
       networkPassphrase: config.networkPassphrase,
-      baseFee: config.baseFee ?? BASE_FEE,
+      baseFee: Number(config.baseFee ?? BASE_FEE),
       timeoutSeconds: config.timeoutSeconds ?? 30,
     };
   }
@@ -106,7 +106,7 @@ export class SorobanTransactionBuilder {
 
     // ── Step 3: Create TransactionBuilder ──────────────────────────────────
     const builder = new TransactionBuilder(account, {
-      fee: this.config.baseFee,
+      fee: String(this.config.baseFee),
       networkPassphrase: this.config.networkPassphrase,
     });
 

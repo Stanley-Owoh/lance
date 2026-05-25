@@ -23,7 +23,7 @@ export interface SubmissionConfig {
 
 export interface SubmissionResult {
   hash: string;
-  status: "SUCCESS" | "FAILED" | "TIMEOUT" | "ERROR";
+  status: "SUCCESS" | "FAILED" | "TIMEOUT" | "ERROR" | "NOT_FOUND";
   resultXdr?: string;
   ledger?: number;
   createdAt?: string;
@@ -241,14 +241,13 @@ function rebuildTransaction(
   // Copy operations from original transaction
   const operations = originalTx.operations;
   for (const op of operations) {
-    txBuilder.addOperation(op);
+    txBuilder.addOperation(op as any);
   }
 
   // Copy timebounds
-  if (originalTx.timebounds) {
-    txBuilder.setTimebounds(
-      originalTx.timebounds.minTime,
-      originalTx.timebounds.maxTime,
+  if (originalTx.timeBounds) {
+    txBuilder.setTimeout(
+      parseInt(originalTx.timeBounds.maxTime.toString(), 10)
     );
   }
 

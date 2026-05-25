@@ -155,10 +155,10 @@ export function TxDetailsCard({
 
           <div className="flex items-center gap-2">
             <code className="flex-1 rounded bg-slate-50 px-3 py-2 font-mono text-xs text-slate-700">
-              {event.polling.ledger}
+              {event.polling?.ledger}
             </code>
             <button
-              onClick={() => copyToClipboard(String(event.polling.ledger), "ledger")}
+              onClick={() => event.polling?.ledger && copyToClipboard(String(event.polling.ledger), "ledger")}
               className="p-2 hover:bg-slate-100 rounded transition-colors"
               title="Copy ledger sequence"
             >

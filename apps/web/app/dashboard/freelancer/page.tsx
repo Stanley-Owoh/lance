@@ -201,13 +201,17 @@ export default function FreelancerDashboard() {
           {/* Projects Grid */}
           <div className="dashboard-grid">
             {filteredProjects.map((project, index) => (
-              <ProjectCard
+              <div 
                 key={project.id}
-                project={project}
-                onViewDetails={handleViewProject}
                 style={{ animationDelay: `${index * 50}ms` }}
-              />
+              >
+                <ProjectCard
+                  project={project}
+                  onViewDetails={handleViewProject}
+                />
+              </div>
             ))}
+
           </div>
 
           {filteredProjects.length === 0 && (

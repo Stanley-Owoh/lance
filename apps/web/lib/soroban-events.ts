@@ -9,7 +9,7 @@
  */
 
 import {
-  SorobanRpc,
+  rpc as SorobanRpc,
   TransactionBuilder,
   Networks,
   Address,
@@ -18,6 +18,7 @@ import {
   xdr,
   Account,
   Transaction,
+  Contract,
 } from "@stellar/stellar-sdk";
 import { APP_STELLAR_NETWORK } from "./stellar";
 
@@ -78,7 +79,7 @@ export function getSorobanServer(): SorobanRpc.Server {
 export async function buildSorobanTransaction(
   options: TransactionBuildOptions,
 ): Promise<{
-  transaction: SorobanRpc.Api.Simulation;
+  transaction: SorobanRpc.Api.SimulateTransactionResponse;
   preparedTransaction: Transaction;
 }> {
   const server = getSorobanServer();
@@ -87,10 +88,10 @@ export async function buildSorobanTransaction(
   try {
     // 1. Get source account
     const sourceAccount = await server.getAccount(source);
-    const account = new Account(sourceAccount.address, sourceAccount.sequence);
+    const account = sourceAccount;
 
     // 2. Build contract invocation
-    const contract = new Address(contractId);
+    const contract = new Contract(contractId);
     const scValArgs = args.map((arg) => nativeToScVal(arg));
 
     // 3. Create transaction
@@ -98,15 +99,7 @@ export async function buildSorobanTransaction(
       fee: fee ?? "100",
       networkPassphrase: APP_STELLAR_NETWORK,
     })
-      .addOperation(
-        xdr.Operation.invokeHostFunction({
-          hostFunction: xdr.HostFunction.hostFunctionTypeInvokeContract({
-            contractAddress: contract.toScAddress(),
-            functionName: method,
-            args: scValArgs,
-          }),
-        }),
-      )
+      .addOperation(contract.call(method, ...scValArgs))
       .setTimeout(30)
       .build();
 
@@ -144,8 +137,8 @@ export async function submitAndPollTransaction(
   pollIntervalMs: number = 2000,
 ): Promise<TransactionResult> {
   const server = getSorobanServer();
-  const transaction = new SorobanRpc.Api.Transaction(signedXdr, APP_STELLAR_NETWORK);
-  const hash = transaction.hash();
+  const transaction = new Transaction(signedXdr, APP_STELLAR_NETWORK);
+  const hash = transaction.hash().toString("hex");
 
   console.log(`[Soroban] Submitting transaction ${hash}`);
 
@@ -166,15 +159,24 @@ export async function submitAndPollTransaction(
         if (txResponse.status === "SUCCESS") {
           console.log(`[Soroban] Transaction confirmed: ${hash}`);
           
-          const events = parseSorobanEvents(txResponse.results?.metaV3 || []);
+          const events = parseSorobanEvents((txResponse as any).results?.metaV3 || []);
+          
+          const getCreatedAtIso = () => {
+            if (!txResponse.createdAt) return undefined;
+            if (typeof txResponse.createdAt === "number") {
+              const ms = txResponse.createdAt < 100000000000 ? txResponse.createdAt * 1000 : txResponse.createdAt;
+              return new Date(ms).toISOString();
+            }
+            return String(txResponse.createdAt);
+          };
           
           return {
             hash,
             status: "SUCCESS",
             events,
             ledger: txResponse.ledger,
-            createdAt: txResponse.createdAt?.toISOString(),
-            feeCharged: txResponse.feeCharged,
+            createdAt: getCreatedAtIso(),
+            feeCharged: (txResponse as any).feeCharged,
           };
         }
 
@@ -184,7 +186,7 @@ export async function submitAndPollTransaction(
             hash,
             status: "FAILED",
             events: [],
-            error: txResponse.errorMessage || "Transaction failed on-chain",
+            error: (txResponse as any).errorMessage || "Transaction failed on-chain",
             ledger: txResponse.ledger,
           };
         }
@@ -202,7 +204,7 @@ export async function submitAndPollTransaction(
 
   if (sendResponse.status === "ERROR") {
     throw new Error(
-      `Transaction submission failed: ${sendResponse.errorResultXdr || "Unknown error"}`,
+      `Transaction submission failed: ${(sendResponse as any).errorResultXdr || (sendResponse as any).errorResult || "Unknown error"}`,
     );
   }
 
@@ -220,16 +222,35 @@ export function parseSorobanEvents(
   const events: SorobanEvent[] = [];
 
   for (const change of metaV3) {
-    if (change.type === "ledgerEntryCreated" || change.type === "ledgerEntryUpdated") {
+    const changeAny = change as any;
+    const arm = changeAny.arm?.() || changeAny.type || changeAny.switch?.()?.name || changeAny.switch?.();
+    const isCreated = arm === "created" || arm === "ledgerEntryCreated" || arm === 1; // 1 is often LedgerEntryChangeTypeCreated
+    const isUpdated = arm === "updated" || arm === "ledgerEntryUpdated" || arm === 2; // 2 is LedgerEntryChangeTypeUpdated
+    
+    if (isCreated || isUpdated) {
       try {
-        const entryData = change.created()?.data || change.updated()?.data;
-        if (entryData?.contractData) {
-          const contractData = entryData.contractData();
+        const entry = isCreated
+          ? (typeof changeAny.created === "function" ? changeAny.created() : changeAny.created)
+          : (typeof changeAny.updated === "function" ? changeAny.updated() : changeAny.updated);
+        
+        if (!entry) continue;
+        const entryData = typeof entry.data === "function" ? entry.data() : entry.data;
+        if (!entryData) continue;
+
+        const contractData = typeof entryData.contractData === "function" 
+          ? entryData.contractData() 
+          : entryData.contractData;
+        
+        if (contractData) {
+          const contract = typeof contractData.contract === "function" ? contractData.contract() : contractData.contract;
+          const key = typeof contractData.key === "function" ? contractData.key() : contractData.key;
+          const val = typeof contractData.val === "function" ? contractData.val() : contractData.val;
+
           events.push({
-            contractId: Address.fromScAddress(contractData.contract()).toString(),
+            contractId: Address.fromScAddress(contract).toString(),
             type: "contract",
-            topics: parseScValArray(contractData.key().vec() || []),
-            data: scValToNative(contractData.val()),
+            topics: parseScValArray((typeof key.vec === "function" ? key.vec() : key.vec) || []),
+            data: scValToNative(val),
           });
         }
       } catch (error) {
@@ -249,13 +270,36 @@ export function parseDiagnosticEvents(
 ): SorobanEvent[] {
   return events.map((event) => {
     const diagnosticEvent = event.event();
+    const contractIdScAddress = diagnosticEvent.contractId();
+    
+    // contractId is a hash/buffer here, convert using Address.contract
+    const contractId = contractIdScAddress
+      ? Address.contract(contractIdScAddress).toString()
+      : "system";
+
+    let topics: unknown[] = [];
+    let data: unknown = null;
+
+    try {
+      const body = typeof diagnosticEvent.body === "function" ? (diagnosticEvent as any).body() : (diagnosticEvent as any).body;
+      if (body) {
+        const eventV0 = typeof body.v0 === "function" ? body.v0() : body.v0;
+        if (eventV0) {
+          const rawTopics = typeof eventV0.topics === "function" ? eventV0.topics() : eventV0.topics;
+          const rawData = typeof eventV0.data === "function" ? eventV0.data() : eventV0.data;
+          topics = parseScValArray(rawTopics || []);
+          data = scValToNative(rawData);
+        }
+      }
+    } catch (err) {
+      console.warn("[Soroban] Failed to parse diagnostic event body:", err);
+    }
+
     return {
-      contractId: diagnosticEvent.contractId
-        ? Address.fromScAddress(diagnosticEvent.contractId()).toString()
-        : "system",
+      contractId,
       type: "diagnostic",
-      topics: parseScValArray(diagnosticEvent.topics()),
-      data: scValToNative(diagnosticEvent.data()),
+      topics,
+      data,
     };
   });
 }
@@ -404,7 +448,7 @@ export async function monitorContractEvents(
  * Get transaction explorer URL
  */
 export function getTransactionExplorerUrl(hash: string): string {
-  const isTestnet = APP_STELLAR_NETWORK === Networks.TESTNET;
+  const isTestnet = APP_STELLAR_NETWORK === "testnet";
   return isTestnet
     ? `https://stellar.expert/explorer/testnet/tx/${hash}`
     : `https://stellar.expert/explorer/public/tx/${hash}`;
@@ -414,7 +458,7 @@ export function getTransactionExplorerUrl(hash: string): string {
  * Get contract explorer URL
  */
 export function getContractExplorerUrl(contractId: string): string {
-  const isTestnet = APP_STELLAR_NETWORK === Networks.TESTNET;
+  const isTestnet = APP_STELLAR_NETWORK === "testnet";
   return isTestnet
     ? `https://stellar.expert/explorer/testnet/contract/${contractId}`
     : `https://stellar.expert/explorer/public/contract/${contractId}`;

@@ -16,9 +16,8 @@ services:
 
   api:
     build:
-      context: .
-      dockerfile: backend/Dockerfile
-      target: api
+      context: ./backend
+      dockerfile: Dockerfile
     env_file: backend/.env
     environment:
       DATABASE_URL: postgres://lance:lance@db:5432/lance
@@ -31,12 +30,12 @@ services:
 
   worker:
     build:
-      context: .
-      dockerfile: backend/Dockerfile
-      target: worker
+      context: ./backend
+      dockerfile: Dockerfile
     env_file: backend/.env
     environment:
       DATABASE_URL: postgres://lance:lance@db:5432/lance
+    command: ["node", "dist/worker.js"]
     depends_on:
       db:
         condition: service_healthy

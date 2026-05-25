@@ -5,7 +5,13 @@
  * Provides submitToHorizon() method using Horizon.sendTransaction().
  */
 
-import { Transaction, Horizon } from "@stellar/stellar-sdk";
+import {
+  Transaction,
+  Horizon,
+  BadRequestError,
+  BadResponseError,
+  NotFoundError,
+} from "@stellar/stellar-sdk";
 import { horizonServer } from "../stellar";
 
 export interface HorizonSubmissionResult {
@@ -39,23 +45,34 @@ export async function submitToHorizon(
 
     // If no hash but no error, treat as pending
     return {
-      hash: response.id || "",
+      hash: response.hash || "",
       status: "pending",
     };
   } catch (error) {
     const errorMessage =
       error instanceof Error ? error.message : "Unknown Horizon submission error";
 
-    // Check for specific Horizon error types
-    if (error instanceof Horizon.TransactionFailedError) {
+    // Transaction submission errors with result XDR (version-dependent SDK shape)
+    if (
+      error &&
+      typeof error === "object" &&
+      "resultXdr" in error &&
+      typeof (error as { resultXdr?: unknown }).resultXdr === "string"
+    ) {
+      const txHash =
+        "hash" in (error as Record<string, unknown>) &&
+        typeof (error as { hash?: unknown }).hash === "string"
+          ? ((error as { hash?: string }).hash ?? "")
+          : "";
+
       return {
-        hash: error.hash || "",
+        hash: txHash,
         status: "error",
-        errorMessage: `Transaction failed: ${error.resultXdr}`,
+        errorMessage: `Transaction failed: ${(error as { resultXdr: string }).resultXdr}`,
       };
     }
 
-    if (error instanceof Horizon.BadRequestError) {
+    if (error instanceof BadRequestError) {
       return {
         hash: "",
         status: "error",
@@ -63,7 +80,7 @@ export async function submitToHorizon(
       };
     }
 
-    if (error instanceof Horizon.BadResponseError) {
+    if (error instanceof BadResponseError) {
       return {
         hash: "",
         status: "error",
@@ -94,7 +111,7 @@ export async function getHorizonTransactionStatus(
     return tx;
   } catch (error) {
     // Transaction not found or other error
-    if (error instanceof Horizon.NotFoundError) {
+    if (error instanceof NotFoundError) {
       return null;
     }
     throw error;

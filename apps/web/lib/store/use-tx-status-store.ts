@@ -19,6 +19,8 @@ export interface TxStatusState {
   unsignedXdr: string | null;
   /** Signed XDR of the transaction (base64). */
   signedXdr: string | null;
+  /** Raw XDR of the transaction (base64). */
+  rawXdr: string | null;
   /** Simulation diagnostics (fee, resources). */
   simulation: SimulationResult | null;
   /** Timestamp (ms) when the current transaction started. */
@@ -31,6 +33,7 @@ export interface TxStatusState {
   setTxHash: (hash: string) => void;
   setUnsignedXdr: (xdr: string | null) => void;
   setSignedXdr: (xdr: string | null) => void;
+  setRawXdr: (xdr: string | null) => void;
   setSimulation: (simulation: SimulationResult | null) => void;
   reset: () => void;
 }
@@ -41,6 +44,7 @@ const INITIAL = {
   txHash: null as string | null,
   unsignedXdr: null as string | null,
   signedXdr: null as string | null,
+  rawXdr: null as string | null,
   simulation: null as SimulationResult | null,
   startedAt: null as number | null,
   finishedAt: null as number | null,
@@ -64,6 +68,7 @@ export const useTxStatusStore = create<TxStatusState>()((set) => ({
   setTxHash: (hash: string) => set({ txHash: hash }),
   setUnsignedXdr: (xdr: string | null) => set({ unsignedXdr: xdr }),
   setSignedXdr: (xdr: string | null) => set({ signedXdr: xdr }),
+  setRawXdr: (xdr: string | null) => set({ rawXdr: xdr }),
   setSimulation: (simulation: SimulationResult | null) => set({ simulation }),
   reset: () => set(INITIAL),
 }));

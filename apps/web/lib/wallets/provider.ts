@@ -80,8 +80,7 @@ export function sanitizeXdrForLogging(xdr: string): string {
  */
 export function getTransactionHash(tx: Transaction): string {
   try {
-    const envelope = tx.toEnvelope();
-    const hash = envelope.hash();
+    const hash = tx.hash();
     return hash.toString("hex");
   } catch (error) {
     if (process.env.NODE_ENV === "development") {
@@ -134,7 +133,7 @@ export function validateTransactionBeforeSigning(
   }
 
   // Check timebounds
-  if (!tx.timebounds) {
+  if (!tx.timeBounds) {
     errors.push("Transaction has no timebounds");
   }
 

@@ -1,10 +1,13 @@
 "use client";
 
-import { useWallet } from "@/hooks/use-wallet";
+import { useWalletStore } from "@/lib/store/use-wallet-store";
 import { SignTransactionModal } from "@/components/blockchain/sign-transaction-modal";
 
 export function TransactionSigningProvider({ children }: { children: React.ReactNode }) {
-  const { signingTx, confirmSigning, cancelSigning } = useWallet();
+  const { signingTx, setSigningTx } = useWalletStore();
+  const confirmSigning = () => setSigningTx(null);
+  const cancelSigning = () => setSigningTx(null);
+
 
   return (
     <>

@@ -39,17 +39,8 @@ export default function NewJobPage() {
       estimated_completion_date: completionDate?.toISOString(),
     });
   }
-
-  const nextStep = () => setStep((s) => (s + 1) as Step);
-  const prevStep = () => setStep((s) => (s - 1) as Step);
-
-  const canGoNext = () => {
-    if (step === 1) return title.length >= 5 && description.length >= 20;
-    if (step === 2) return budget >= 100 && milestones >= 1 && estimatedCompletionDate >= today;
-    return true;
-  };
-
   return (
+
     <SiteShell
       eyebrow="Create Opportunity"
       title="Define your project scope with high-precision milestones."
