@@ -27,6 +27,9 @@ pub enum JobRegistryError {
     Overflow = 14,
     BidSubmissionClosed = 15,
     InvalidDeadline = 16,
+    InvalidExpiration = 17,
+    JobExpired = 18,
+    JobNotExpired = 19,
 }
 
 #[contracttype]
@@ -37,6 +40,7 @@ pub enum JobStatus {
     DeliverableSubmitted,
     Completed,
     Disputed,
+    Expired,
 }
 
 #[contracttype]
@@ -46,6 +50,7 @@ pub struct JobRecord {
     pub freelancer: Option<Address>,
     pub metadata_hash: Bytes,
     pub budget_stroops: i128,
+    pub expires_at: u64,
     pub status: JobStatus,
     pub bid_deadline: u64,
     pub collateral_token: Address,
@@ -111,17 +116,18 @@ impl JobRegistryContract {
         client: Address,
         hash: Bytes,
         budget: i128,
+        expires_at: u64,
         bid_deadline: u64,
         collateral_token: Address,
         collateral_amount: i128,
     ) {
         ensure_initialized(&env);
-        validate_job_input(&env, job_id, &hash, budget);
+        validate_job_input(&env, job_id, &hash, budget, expires_at);
 
         client.require_auth();
 
         let now = env.ledger().timestamp();
-        if bid_deadline <= now {
+        if bid_deadline <= now || bid_deadline >= expires_at {
             panic_with_error!(&env, JobRegistryError::InvalidDeadline);
         }
         if collateral_amount < 0 {
@@ -134,6 +140,7 @@ impl JobRegistryContract {
             client.clone(),
             hash,
             budget,
+            expires_at,
             bid_deadline,
             collateral_token.clone(),
             collateral_amount,
@@ -156,10 +163,11 @@ impl JobRegistryContract {
 
         log!(
             &env,
-            "post_job: id {} client {} budget {} deadline {} collateral {} amount {}",
+            "post_job: id {} client {} budget {} expires_at {} deadline {} collateral {} amount {}",
             job_id,
             client,
             budget,
+            expires_at,
             bid_deadline,
             collateral_token,
             collateral_amount
@@ -174,6 +182,7 @@ impl JobRegistryContract {
         client: Address,
         hash: Bytes,
         budget: i128,
+        expires_at: u64,
         bid_deadline: u64,
         collateral_token: Address,
         collateral_amount: i128,
@@ -181,12 +190,12 @@ impl JobRegistryContract {
         ensure_initialized(&env);
 
         let job_id = read_next_job_id(&env);
-        validate_job_input(&env, job_id, &hash, budget);
+        validate_job_input(&env, job_id, &hash, budget, expires_at);
 
         client.require_auth();
 
         let now = env.ledger().timestamp();
-        if bid_deadline <= now {
+        if bid_deadline <= now || bid_deadline >= expires_at {
             panic_with_error!(&env, JobRegistryError::InvalidDeadline);
         }
         if collateral_amount < 0 {
@@ -199,6 +208,7 @@ impl JobRegistryContract {
             client.clone(),
             hash,
             budget,
+            expires_at,
             bid_deadline,
             collateral_token.clone(),
             collateral_amount,
@@ -217,10 +227,11 @@ impl JobRegistryContract {
 
         log!(
             &env,
-            "post_job_auto: id {} client {} budget {} deadline {} collateral {} amount {}",
+            "post_job_auto: id {} client {} budget {} expires_at {} deadline {} collateral {} amount {}",
             job_id,
             client,
             budget,
+            expires_at,
             bid_deadline,
             collateral_token,
             collateral_amount
@@ -249,6 +260,9 @@ impl JobRegistryContract {
         }
 
         let now = env.ledger().timestamp();
+        if now >= job.expires_at {
+            panic_with_error!(&env, JobRegistryError::JobExpired);
+        }
         if now > job.bid_deadline {
             panic_with_error!(&env, JobRegistryError::BidSubmissionClosed);
         }
@@ -286,6 +300,11 @@ impl JobRegistryContract {
 
         if job.status != JobStatus::Open {
             panic_with_error!(&env, JobRegistryError::JobNotOpen);
+        }
+
+        let now = env.ledger().timestamp();
+        if now >= job.expires_at {
+            panic_with_error!(&env, JobRegistryError::JobExpired);
         }
         if client != job.client {
             panic_with_error!(&env, JobRegistryError::Unauthorized);
@@ -430,6 +449,50 @@ impl JobRegistryContract {
         env.events().publish((symbol_short!("refund"), job_id), ());
     }
 
+    /// Client cancels an expired open job, returning collateral and deleting bids list.
+    pub fn cancel_expired_job(env: Env, job_id: u64, client: Address) {
+        ensure_initialized(&env);
+        client.require_auth();
+
+        let key = DataKey::Job(job_id);
+        let mut job: JobRecord = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .unwrap_or_else(|| panic_with_error!(&env, JobRegistryError::JobNotFound));
+
+        if job.status != JobStatus::Open {
+            panic_with_error!(&env, JobRegistryError::InvalidStateTransition);
+        }
+        if client != job.client {
+            panic_with_error!(&env, JobRegistryError::Unauthorized);
+        }
+
+        let now = env.ledger().timestamp();
+        if now < job.expires_at {
+            panic_with_error!(&env, JobRegistryError::JobNotExpired);
+        }
+
+        job.status = JobStatus::Expired;
+
+        // Refund collateral if locked
+        if job.collateral_locked && job.collateral_amount > 0 {
+            let token_client = token::Client::new(&env, &job.collateral_token);
+            token_client.transfer(
+                &env.current_contract_address(),
+                &job.client,
+                &job.collateral_amount,
+            );
+            job.collateral_locked = false;
+        }
+
+        env.storage().persistent().set(&key, &job);
+        env.storage().persistent().remove(&DataKey::Bids(job_id));
+
+        log!(&env, "cancel_expired_job: id {}", job_id);
+        env.events().publish((symbol_short!("cancel"), job_id), ());
+    }
+
     /// Mark job disputed. Only the initialized admin can call this.
     pub fn mark_disputed(env: Env, job_id: u64) {
         ensure_initialized(&env);
@@ -511,12 +574,16 @@ fn read_next_job_id(env: &Env) -> u64 {
         .unwrap_or_else(|| panic_with_error!(env, JobRegistryError::NotInitialized))
 }
 
-fn validate_job_input(env: &Env, job_id: u64, hash: &Bytes, budget: i128) {
+fn validate_job_input(env: &Env, job_id: u64, hash: &Bytes, budget: i128, expires_at: u64) {
     if job_id == 0 {
         panic_with_error!(env, JobRegistryError::InvalidJobId);
     }
     if budget <= 0 {
         panic_with_error!(env, JobRegistryError::InvalidBudget);
+    }
+    let now = env.ledger().timestamp();
+    if expires_at <= now {
+        panic_with_error!(env, JobRegistryError::InvalidExpiration);
     }
     validate_hash(env, hash);
 }
@@ -534,6 +601,7 @@ fn post_job_with_id(
     client: Address,
     hash: Bytes,
     budget: i128,
+    expires_at: u64,
     bid_deadline: u64,
     collateral_token: Address,
     collateral_amount: i128,
@@ -548,6 +616,7 @@ fn post_job_with_id(
         freelancer: None,
         metadata_hash: hash,
         budget_stroops: budget,
+        expires_at,
         status: JobStatus::Open,
         bid_deadline,
         collateral_token,
@@ -593,6 +662,10 @@ mod test {
         (env, cc, admin, client, freelancer, token_addr)
     }
 
+    fn future_expires_at(env: &Env) -> u64 {
+        env.ledger().timestamp() + 30 * 24 * 60 * 60
+    }
+
     #[test]
     fn test_initialize_bootstraps_storage() {
         let (_env, cc, admin, _, _, _) = setup();
@@ -618,7 +691,8 @@ mod test {
     fn test_post_job_before_initialize_panics() {
         let (env, cc, _admin, client, _, token_addr) = setup();
         let hash = Bytes::from_slice(&env, b"QmHash");
-        cc.post_job(&1u64, &client, &hash, &5000i128, &2000u64, &token_addr, &1000i128);
+        let expires_at = future_expires_at(&env);
+        cc.post_job(&1u64, &client, &hash, &5000i128, &expires_at, &2000u64, &token_addr, &1000i128);
     }
 
     #[test]
@@ -630,9 +704,11 @@ mod test {
         let hash2 = Bytes::from_slice(&env, b"QmHash2");
 
         env.ledger().set_timestamp(100);
+        let expires_at1 = future_expires_at(&env);
+        let expires_at2 = future_expires_at(&env);
 
-        let id1 = cc.post_job_auto(&client, &hash1, &5000i128, &1000u64, &token_addr, &1000i128);
-        let id2 = cc.post_job_auto(&client, &hash2, &7000i128, &2000u64, &token_addr, &2000i128);
+        let id1 = cc.post_job_auto(&client, &hash1, &5000i128, &expires_at1, &1000u64, &token_addr, &1000i128);
+        let id2 = cc.post_job_auto(&client, &hash2, &7000i128, &expires_at2, &2000u64, &token_addr, &2000i128);
 
         assert_eq!(id1, 1u64);
         assert_eq!(id2, 2u64);
@@ -646,7 +722,8 @@ mod test {
 
         let hash = Bytes::from_slice(&env, b"QmHash");
         env.ledger().set_timestamp(100);
-        cc.post_job(&42u64, &client, &hash, &5000i128, &1000u64, &token_addr, &1000i128);
+        let expires_at = future_expires_at(&env);
+        cc.post_job(&42u64, &client, &hash, &5000i128, &expires_at, &1000u64, &token_addr, &1000i128);
 
         assert_eq!(cc.get_next_job_id(), 43u64);
     }
@@ -659,7 +736,8 @@ mod test {
 
         let hash = Bytes::from_slice(&env, b"QmHash");
         env.ledger().set_timestamp(100);
-        cc.post_job(&1u64, &client, &hash, &0i128, &1000u64, &token_addr, &1000i128);
+        let expires_at = future_expires_at(&env);
+        cc.post_job(&1u64, &client, &hash, &0i128, &expires_at, &1000u64, &token_addr, &1000i128);
     }
 
     #[test]
@@ -670,7 +748,8 @@ mod test {
 
         let empty = Bytes::from_slice(&env, b"");
         env.ledger().set_timestamp(100);
-        cc.post_job(&1u64, &client, &empty, &5000i128, &1000u64, &token_addr, &1000i128);
+        let expires_at = future_expires_at(&env);
+        cc.post_job(&1u64, &client, &empty, &5000i128, &expires_at, &1000u64, &token_addr, &1000i128);
     }
 
     #[test]
@@ -680,7 +759,8 @@ mod test {
 
         let hash = Bytes::from_slice(&env, b"QmSomeIPFSHash");
         env.ledger().set_timestamp(100);
-        cc.post_job(&1u64, &client, &hash, &5000i128, &1000u64, &token_addr, &1000i128);
+        let expires_at = future_expires_at(&env);
+        cc.post_job(&1u64, &client, &hash, &5000i128, &expires_at, &1000u64, &token_addr, &1000i128);
 
         let tc = token::Client::new(&env, &token_addr);
         assert_eq!(tc.balance(&cc.address), 1000);
@@ -725,7 +805,8 @@ mod test {
 
         let hash = Bytes::from_slice(&env, b"QmHash");
         env.ledger().set_timestamp(100);
-        cc.post_job(&1u64, &client, &hash, &5000i128, &1000u64, &token_addr, &1000i128);
+        let expires_at = future_expires_at(&env);
+        cc.post_job(&1u64, &client, &hash, &5000i128, &expires_at, &1000u64, &token_addr, &1000i128);
 
         let proposal = Bytes::from_slice(&env, b"QmProposal");
         cc.submit_bid(&1u64, &freelancer, &proposal);
@@ -740,7 +821,8 @@ mod test {
 
         let hash = Bytes::from_slice(&env, b"QmHash");
         env.ledger().set_timestamp(100);
-        cc.post_job(&1u64, &client, &hash, &5000i128, &1000u64, &token_addr, &1000i128);
+        let expires_at = future_expires_at(&env);
+        cc.post_job(&1u64, &client, &hash, &5000i128, &expires_at, &1000u64, &token_addr, &1000i128);
 
         cc.accept_bid(&1u64, &client, &freelancer);
     }
@@ -752,7 +834,8 @@ mod test {
 
         let hash = Bytes::from_slice(&env, b"QmHash");
         env.ledger().set_timestamp(100);
-        cc.post_job(&1u64, &client, &hash, &5000i128, &1000u64, &token_addr, &1000i128);
+        let expires_at = future_expires_at(&env);
+        cc.post_job(&1u64, &client, &hash, &5000i128, &expires_at, &1000u64, &token_addr, &1000i128);
 
         let proposal = Bytes::from_slice(&env, b"QmProposal");
         cc.submit_bid(&1u64, &freelancer, &proposal);
@@ -771,7 +854,8 @@ mod test {
 
         let hash = Bytes::from_slice(&env, b"QmHash");
         env.ledger().set_timestamp(100);
-        cc.post_job(&1u64, &client, &hash, &5000i128, &1000u64, &token_addr, &1000i128);
+        let expires_at = future_expires_at(&env);
+        cc.post_job(&1u64, &client, &hash, &5000i128, &expires_at, &1000u64, &token_addr, &1000i128);
 
         cc.mark_disputed(&1u64);
     }
@@ -784,7 +868,8 @@ mod test {
 
         let hash = Bytes::from_slice(&env, b"QmHash");
         env.ledger().set_timestamp(100);
-        cc.post_job(&1u64, &client, &hash, &5000i128, &1000u64, &token_addr, &1000i128);
+        let expires_at = future_expires_at(&env);
+        cc.post_job(&1u64, &client, &hash, &5000i128, &expires_at, &1000u64, &token_addr, &1000i128);
 
         cc.get_deliverable(&1u64);
     }
@@ -797,7 +882,8 @@ mod test {
 
         let hash = Bytes::from_slice(&env, b"QmHash");
         env.ledger().set_timestamp(100);
-        cc.post_job(&1u64, &client, &hash, &5000i128, &1000u64, &token_addr, &1000i128);
+        let expires_at = future_expires_at(&env);
+        cc.post_job(&1u64, &client, &hash, &5000i128, &expires_at, &1000u64, &token_addr, &1000i128);
 
         env.ledger().set_timestamp(1001); // past the deadline of 1000
         let proposal = Bytes::from_slice(&env, b"QmProposal");
@@ -811,7 +897,8 @@ mod test {
 
         let hash = Bytes::from_slice(&env, b"QmHash");
         env.ledger().set_timestamp(100);
-        cc.post_job(&1u64, &client, &hash, &5000i128, &1000u64, &token_addr, &1000i128);
+        let expires_at = future_expires_at(&env);
+        cc.post_job(&1u64, &client, &hash, &5000i128, &expires_at, &1000u64, &token_addr, &1000i128);
 
         let tc = token::Client::new(&env, &token_addr);
         assert_eq!(tc.balance(&client), 99000);
@@ -822,5 +909,71 @@ mod test {
         let job = cc.get_job(&1u64);
         assert!(!job.collateral_locked);
         assert_eq!(tc.balance(&client), 100000);
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_submit_bid_after_expiration_panics() {
+        let (env, cc, admin, client, freelancer, token_addr) = setup();
+        cc.initialize(&admin);
+
+        let hash = Bytes::from_slice(&env, b"QmHash");
+        env.ledger().set_timestamp(100);
+        let expires_at = future_expires_at(&env);
+        cc.post_job(&1u64, &client, &hash, &5000i128, &expires_at, &1000u64, &token_addr, &1000i128);
+
+        env.ledger().set_timestamp(expires_at + 1);
+
+        let proposal = Bytes::from_slice(&env, b"QmProposal");
+        cc.submit_bid(&1u64, &freelancer, &proposal);
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_accept_bid_after_expiration_panics() {
+        let (env, cc, admin, client, freelancer, token_addr) = setup();
+        cc.initialize(&admin);
+
+        let hash = Bytes::from_slice(&env, b"QmHash");
+        env.ledger().set_timestamp(100);
+        let expires_at = future_expires_at(&env);
+        cc.post_job(&1u64, &client, &hash, &5000i128, &expires_at, &1000u64, &token_addr, &1000i128);
+
+        let proposal = Bytes::from_slice(&env, b"QmProposal");
+        cc.submit_bid(&1u64, &freelancer, &proposal);
+
+        env.ledger().set_timestamp(expires_at + 1);
+        cc.accept_bid(&1u64, &client, &freelancer);
+    }
+
+    #[test]
+    fn test_cancel_expired_job_by_client() {
+        let (env, cc, admin, client, _, token_addr) = setup();
+        cc.initialize(&admin);
+
+        let hash = Bytes::from_slice(&env, b"QmHash");
+        env.ledger().set_timestamp(100);
+        let expires_at = future_expires_at(&env);
+        cc.post_job(&1u64, &client, &hash, &5000i128, &expires_at, &1000u64, &token_addr, &1000i128);
+
+        env.ledger().set_timestamp(expires_at + 1);
+        cc.cancel_expired_job(&1u64, &client);
+
+        let job = cc.get_job(&1u64);
+        assert_eq!(job.status, JobStatus::Expired);
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_cancel_expired_job_before_expiration_panics() {
+        let (env, cc, admin, client, _, token_addr) = setup();
+        cc.initialize(&admin);
+
+        let hash = Bytes::from_slice(&env, b"QmHash");
+        env.ledger().set_timestamp(100);
+        let expires_at = future_expires_at(&env);
+        cc.post_job(&1u64, &client, &hash, &5000i128, &expires_at, &1000u64, &token_addr, &1000i128);
+
+        cc.cancel_expired_job(&1u64, &client);
     }
 }
