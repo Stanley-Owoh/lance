@@ -7,6 +7,7 @@ use soroban_sdk::{
 
 mod profile;
 mod storage;
+pub use profile::{BadgeMetadataEntry, BadgeTier};
 
 // Types matching Job Registry contract's public types for cross-contract decoding
 #[contracttype]
@@ -389,6 +390,61 @@ impl ReputationContract {
         Self::bump_instance_ttl(&env);
     }
 
+    /// Admin-only: set the decentralised-storage URI for a badge tier.
+    /// `uri` is typically an IPFS CID pointing to the badge image/JSON.
+    pub fn set_badge_metadata(
+        env: Env,
+        admin: Address,
+        address: Address,
+        tier: BadgeTier,
+        uri: Bytes,
+    ) {
+        let configured_admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .expect("not initialized");
+        admin.require_auth();
+        assert!(admin == configured_admin, "unauthorized");
+
+        let mut profile = storage::read_profile_or_default(&env, &address);
+
+        // Replace existing entry for this tier or push a new one.
+        let mut found = false;
+        let len = profile.badge_metadata.len();
+        for i in 0..len {
+            let entry = profile.badge_metadata.get(i).unwrap();
+            if entry.tier == tier {
+                profile.badge_metadata.set(i, BadgeMetadataEntry { tier: tier.clone(), uri: uri.clone() });
+                found = true;
+                break;
+            }
+        }
+        if !found {
+            profile.badge_metadata.push_back(BadgeMetadataEntry { tier, uri });
+        }
+
+        storage::write_profile(&env, &address, &profile);
+        Self::bump_instance_ttl(&env);
+    }
+
+    /// Return the metadata URI for a given badge tier, or `None` if not set.
+    pub fn get_badge_metadata(
+        env: Env,
+        address: Address,
+        tier: BadgeTier,
+    ) -> Option<Bytes> {
+        Self::bump_instance_ttl(&env);
+        let profile = storage::read_profile_or_default(&env, &address);
+        for i in 0..profile.badge_metadata.len() {
+            let entry = profile.badge_metadata.get(i).unwrap();
+            if entry.tier == tier {
+                return Some(entry.uri);
+            }
+        }
+        None
+    }
+
     pub fn get_score(env: Env, address: Address, role: Role) -> ReputationScore {
         Self::bump_instance_ttl(&env);
         let profile = storage::read_profile_or_default(&env, &address);
@@ -652,6 +708,75 @@ mod test {
         assert_eq!(freelancer_score.total_jobs, 1);
         assert_eq!(freelancer_score.total_points, 4);
         assert_eq!(freelancer_score.reviews, 1);
+    }
+
+    // ── Issue #406: badge metadata mapping ──
+
+    #[test]
+    fn test_set_and_get_badge_metadata() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let admin = Address::generate(&env);
+        let addr = Address::generate(&env);
+        let cid = env.register_contract(None, ReputationContract);
+        let client = ReputationContractClient::new(&env, &cid);
+        client.initialize(&admin);
+
+        let uri = Bytes::from_slice(&env, b"ipfs://QmBronzeBadge");
+        client.set_badge_metadata(&admin, &addr, &BadgeTier::Bronze, &uri);
+
+        let result = client.get_badge_metadata(&addr, &BadgeTier::Bronze);
+        assert_eq!(result, Some(uri));
+    }
+
+    #[test]
+    fn test_badge_metadata_returns_none_when_unset() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let addr = Address::generate(&env);
+        let cid = env.register_contract(None, ReputationContract);
+        let client = ReputationContractClient::new(&env, &cid);
+
+        let result = client.get_badge_metadata(&addr, &BadgeTier::Gold);
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn test_badge_metadata_update_overwrites_existing() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let admin = Address::generate(&env);
+        let addr = Address::generate(&env);
+        let cid = env.register_contract(None, ReputationContract);
+        let client = ReputationContractClient::new(&env, &cid);
+        client.initialize(&admin);
+
+        let uri_v1 = Bytes::from_slice(&env, b"ipfs://QmSilverV1");
+        let uri_v2 = Bytes::from_slice(&env, b"ipfs://QmSilverV2");
+        client.set_badge_metadata(&admin, &addr, &BadgeTier::Silver, &uri_v1);
+        client.set_badge_metadata(&admin, &addr, &BadgeTier::Silver, &uri_v2);
+
+        assert_eq!(client.get_badge_metadata(&addr, &BadgeTier::Silver), Some(uri_v2));
+    }
+
+    #[test]
+    fn test_multiple_tiers_stored_independently() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let admin = Address::generate(&env);
+        let addr = Address::generate(&env);
+        let cid = env.register_contract(None, ReputationContract);
+        let client = ReputationContractClient::new(&env, &cid);
+        client.initialize(&admin);
+
+        let bronze_uri = Bytes::from_slice(&env, b"ipfs://Bronze");
+        let gold_uri   = Bytes::from_slice(&env, b"ipfs://Gold");
+        client.set_badge_metadata(&admin, &addr, &BadgeTier::Bronze, &bronze_uri);
+        client.set_badge_metadata(&admin, &addr, &BadgeTier::Gold,   &gold_uri);
+
+        assert_eq!(client.get_badge_metadata(&addr, &BadgeTier::Bronze), Some(bronze_uri));
+        assert_eq!(client.get_badge_metadata(&addr, &BadgeTier::Gold),   Some(gold_uri));
+        assert_eq!(client.get_badge_metadata(&addr, &BadgeTier::Silver), None);
     }
 
     #[test]

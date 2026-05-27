@@ -1,5 +1,23 @@
 use soroban_sdk::{contracttype, Address, Bytes, Env};
 
+/// Badge tiers keyed in the metadata map.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum BadgeTier {
+    Bronze,
+    Silver,
+    Gold,
+    Platinum,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct BadgeMetadataEntry {
+    pub tier: BadgeTier,
+    /// IPFS CID (or any URI) pointing to the badge image / JSON metadata.
+    pub uri: Bytes,
+}
+
 #[contracttype]
 #[derive(Clone, Debug, PartialEq)]
 pub struct Profile {
@@ -11,6 +29,8 @@ pub struct Profile {
     pub freelancer_points: i32,
     pub freelancer_jobs: u32,
     pub metadata_hash: Option<Bytes>,
+    /// Per-tier badge metadata URIs set by the admin.
+    pub badge_metadata: soroban_sdk::Vec<BadgeMetadataEntry>,
 }
 
 impl Profile {
@@ -24,6 +44,7 @@ impl Profile {
             freelancer_points: 0,
             freelancer_jobs: 0,
             metadata_hash: None,
+            badge_metadata: soroban_sdk::Vec::new(_env),
         }
     }
 
