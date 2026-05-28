@@ -245,7 +245,7 @@ impl ReputationContract {
             total_points: metrics.review.total_points,
             reviews: metrics.review.reviews,
             average_rating_bps: metrics.review.average_rating_bps,
-            badge_level: metrics.badge_level,
+            badge_level: Self::badge_level(metrics, profile.is_blacklisted),
             blacklisted: profile.is_blacklisted,
         }
     }
@@ -708,7 +708,7 @@ impl ReputationContract {
         while i < profile.badge_metadata.len() {
             let entry = profile.badge_metadata.get(i).unwrap();
             if entry.tier == tier {
-                profile.badge_metadata.set(i, BadgeMetadataEntry { tier, uri: uri.clone() });
+                profile.badge_metadata.set(i, BadgeMetadataEntry { tier: tier.clone(), uri: uri.clone() });
                 found = true;
                 break;
             }
