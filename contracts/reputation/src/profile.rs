@@ -25,6 +25,8 @@ pub struct RoleMetrics {
     pub completed_jobs: u32,
     pub review: ReviewAggregate,
     pub badge_level: u32,
+    /// Number of failed disputes - used for badge revocation
+    pub dispute_failures: u32,
 }
 
 impl RoleMetrics {
@@ -34,6 +36,7 @@ impl RoleMetrics {
             completed_jobs: 0,
             review: ReviewAggregate::new(),
             badge_level: 0,
+            dispute_failures: 0,
         }
     }
 }

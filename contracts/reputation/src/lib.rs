@@ -139,6 +139,19 @@ pub struct BlacklistUpdatedEvent {
     pub updated_at: u64,
 }
 
+#[contracttype]
+#[derive(Clone)]
+pub struct DisputeFailureRecordedEvent {
+    pub address: Address,
+    pub role: Role,
+    pub dispute_failures: u32,
+    pub previous_badge_level: u32,
+    pub new_badge_level: u32,
+    pub score_penalty_applied: bool,
+    pub new_score: i32,
+    pub recorded_at: u64,
+}
+
 #[contract]
 pub struct ReputationContract;
 
@@ -153,6 +166,10 @@ impl ReputationContract {
     const DEFAULT_SCORE_BPS: i32 = 5_000;
     const SLASH_DECAY_BPS: i32 = 8_000;
     const BLACKLIST_DECAY_BPS: i32 = 1_000;
+    /// Number of dispute failures that trigger badge revocation
+    const DISPUTE_FAILURE_THRESHOLD: u32 = 3;
+    /// Score penalty applied after badge revocation due to disputes
+    const BADGE_REVOCATION_PENALTY_BPS: i32 = 2_000;
 
     fn bump_instance_ttl(env: &Env) {
         env.storage()
@@ -272,6 +289,11 @@ impl ReputationContract {
     }
 
     fn badge_level(metrics: &RoleMetrics, is_blacklisted: bool) -> u32 {
+        // Revoke badge if dispute failures exceed threshold
+        if metrics.dispute_failures >= Self::DISPUTE_FAILURE_THRESHOLD {
+            return 0;
+        }
+        
         if is_blacklisted {
             0
         } else if metrics.completed_jobs >= 15 && metrics.score >= 9_000 {
@@ -308,6 +330,25 @@ impl ReputationContract {
     fn apply_role_decay(env: &Env, metrics: &mut RoleMetrics, decay_bps: i32, is_blacklisted: bool) {
         metrics.score = Self::apply_decay_bps(env, metrics.score, decay_bps);
         Self::refresh_badge(metrics, is_blacklisted);
+    }
+
+    /// Record a dispute failure and apply badge revocation if threshold is exceeded
+    fn record_dispute_failure(env: &Env, metrics: &mut RoleMetrics, is_blacklisted: bool) {
+        metrics.dispute_failures = metrics.dispute_failures.saturating_add(1);
+        
+        // If dispute failures exceed threshold, revoke badge and apply penalty
+        if metrics.dispute_failures >= Self::DISPUTE_FAILURE_THRESHOLD {
+            let previous_badge_level = metrics.badge_level;
+            metrics.score = Self::apply_decay_bps(env, metrics.score, Self::BADGE_REVOCATION_PENALTY_BPS);
+            Self::refresh_badge(metrics, is_blacklisted);
+            
+            // Badge was revoked if it went from >0 to 0
+            if previous_badge_level > 0 && metrics.badge_level == 0 {
+                // Badge revocation occurred
+            }
+        } else {
+            Self::refresh_badge(metrics, is_blacklisted);
+        }
     }
 
     fn compute_recovery_towards_default(current: i32, recovery_bps: i32) -> i32 {
@@ -676,6 +717,52 @@ impl ReputationContract {
         Self::bump_instance_ttl(&env);
     }
 
+    /// Record a dispute failure for an address. If dispute failures exceed threshold,
+    /// the badge is revoked and a score penalty is applied. Only callable by authorized contract.
+    pub fn record_dispute_failure(
+        env: Env,
+        caller_contract: Address,
+        address: Address,
+        role: Role,
+    ) {
+        Self::require_authorized_contract(&env, &caller_contract);
+
+        let mut profile = storage::read_profile_or_default(&env, &address);
+        if profile.is_blacklisted {
+            soroban_sdk::panic_with_error!(&env, ReputationError::Blacklisted);
+        }
+
+        let is_blacklisted = profile.is_blacklisted;
+        let metrics = Self::role_metrics_mut(&mut profile, &role);
+        let previous_badge_level = metrics.badge_level;
+        let previous_score = metrics.score;
+        
+        Self::record_dispute_failure(&env, metrics, is_blacklisted);
+        
+        let new_badge_level = metrics.badge_level;
+        let new_score = metrics.score;
+        let dispute_failures = metrics.dispute_failures;
+        let score_penalty_applied = previous_score != new_score;
+        
+        profile.last_activity = env.ledger().timestamp();
+        storage::write_profile(&env, &address, &profile);
+        
+        env.events().publish(
+            ("reputation", "DisputeFailureRecorded"),
+            DisputeFailureRecordedEvent {
+                address,
+                role,
+                dispute_failures,
+                previous_badge_level,
+                new_badge_level,
+                score_penalty_applied,
+                new_score,
+                recorded_at: env.ledger().timestamp(),
+            },
+        );
+        Self::bump_instance_ttl(&env);
+    }
+
     pub fn is_blacklisted(env: Env, address: Address) -> bool {
         Self::bump_instance_ttl(&env);
         storage::read_profile(&env, &address)
@@ -803,6 +890,12 @@ mod test {
             let reputation_client = ReputationContractClient::new(&env, &reputation);
             let caller_contract = env.current_contract_address();
             reputation_client.blacklist_profile(&caller_contract, &target, &reason);
+        }
+
+        pub fn record_dispute_failure(env: Env, reputation: Address, target: Address, role: Role) {
+            let reputation_client = ReputationContractClient::new(&env, &reputation);
+            let caller_contract = env.current_contract_address();
+            reputation_client.record_dispute_failure(&caller_contract, &target, &role);
         }
     }
 
@@ -1154,6 +1247,69 @@ mod test {
         assert_eq!(metrics.get(0).unwrap(), 6500);
         assert_eq!(metrics.get(1).unwrap(), 3);
         assert_eq!(metrics.get(4).unwrap(), 1);
+    }
+
+    #[test]
+    fn test_badge_revocation_after_multiple_dispute_failures() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let admin = Address::generate(&env);
+        let freelancer = Address::generate(&env);
+        let reputation_id = env.register_contract(None, ReputationContract);
+        let adjuster_id = env.register_contract(None, AuthorizedAdjuster);
+        let client = ReputationContractClient::new(&env, &reputation_id);
+        let adjuster = AuthorizedAdjusterClient::new(&env, &adjuster_id);
+
+        client.initialize(&admin);
+        client.set_authorized_contract(&admin, &adjuster_id);
+
+        // Build up a high score and badge level
+        adjuster.award(&reputation_id, &freelancer, &Role::Freelancer, &2_000);
+        adjuster.award(&reputation_id, &freelancer, &Role::Freelancer, &2_000);
+        adjuster.award(&reputation_id, &freelancer, &Role::Freelancer, &2_000);
+
+        let score = client.get_score(&freelancer, &Role::Freelancer);
+        assert_eq!(score.score, 11_000); // 5000 + 2000*3, clamped to 10000
+        assert_eq!(score.badge_level, 1); // 3 jobs, score >= 6000
+
+        // First dispute failure - badge should remain
+        adjuster.record_dispute_failure(&reputation_id, &freelancer, &Role::Freelancer);
+        let score_after_1 = client.get_score(&freelancer, &Role::Freelancer);
+        assert_eq!(score_after_1.badge_level, 1);
+
+        // Second dispute failure - badge should remain
+        adjuster.record_dispute_failure(&reputation_id, &freelancer, &Role::Freelancer);
+        let score_after_2 = client.get_score(&freelancer, &Role::Freelancer);
+        assert_eq!(score_after_2.badge_level, 1);
+
+        // Third dispute failure - badge should be revoked (threshold = 3)
+        adjuster.record_dispute_failure(&reputation_id, &freelancer, &Role::Freelancer);
+        let score_after_3 = client.get_score(&freelancer, &Role::Freelancer);
+        assert_eq!(score_after_3.badge_level, 0); // Badge revoked
+        assert!(score_after_3.score < 10_000); // Score penalty applied
+    }
+
+    #[test]
+    fn test_dispute_failure_requires_authorized_contract() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let admin = Address::generate(&env);
+        let attacker = Address::generate(&env);
+        let target = Address::generate(&env);
+        let reputation_id = env.register_contract(None, ReputationContract);
+        let adjuster_id = env.register_contract(None, AuthorizedAdjuster);
+        let client = ReputationContractClient::new(&env, &reputation_id);
+
+        client.initialize(&admin);
+        client.set_authorized_contract(&admin, &adjuster_id);
+
+        // Unauthorized caller should fail
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            client.record_dispute_failure(&attacker, &target, &Role::Freelancer);
+        }));
+        assert!(result.is_err());
     }
 
     #[test]
