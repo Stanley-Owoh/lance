@@ -34,6 +34,63 @@ const POOL_STATEMENT_TIMEOUT_MS = positiveIntEnv("POOL_STATEMENT_TIMEOUT_MS", 50
 const POOL_LOCK_TIMEOUT_MS = positiveIntEnv("POOL_LOCK_TIMEOUT_MS", 1000);
 const POOL_IDLE_IN_TX_TIMEOUT_MS = positiveIntEnv("POOL_IDLE_IN_TX_TIMEOUT_MS", 5000);
 
+const SQLX_MIGRATION_LOCK_PROBE_CONCURRENCY = positiveIntEnv("SQLX_MIGRATION_LOCK_PROBE_CONCURRENCY", 4);
+const SQLX_MIGRATION_LOCK_TIMEOUT_MS = positiveIntEnv("SQLX_MIGRATION_LOCK_TIMEOUT_MS", 1500);
+const SQLX_MIGRATION_STATEMENT_TIMEOUT_MS = positiveIntEnv("SQLX_MIGRATION_STATEMENT_TIMEOUT_MS", 3000);
+
+// SQLx derives its PostgreSQL migration advisory lock from the current database
+// name as: 0x3d32ad9e * crc32(database_name). Keep this local implementation
+// dependency-free so the Node API can audit the exact same cluster-wide mutex
+// used by Rust/SQLx migrators before any backend instance attempts schema work.
+const SQLX_LOCK_MULTIPLIER = 0x3d32ad9en;
+const CRC32_TABLE = Array.from({ length: 256 }, (_, index) => {
+  let crc = index;
+  for (let bit = 0; bit < 8; bit++) {
+    crc = (crc & 1) !== 0 ? 0xedb88320 ^ (crc >>> 1) : crc >>> 1;
+  }
+  return crc >>> 0;
+});
+
+function crc32IsoHdlc(input: string): number {
+  const bytes = Buffer.from(input, "utf8");
+  let crc = 0xffffffff;
+  for (const byte of bytes) {
+    crc = CRC32_TABLE[(crc ^ byte) & 0xff] ^ (crc >>> 8);
+  }
+  return (crc ^ 0xffffffff) >>> 0;
+}
+
+export interface SqlxMigrationLockConfig {
+  databaseName: string;
+  lockId: string;
+  lockKeyClassId: string;
+  lockKeyObjId: string;
+  probeConcurrency: number;
+  lockTimeoutMs: number;
+  statementTimeoutMs: number;
+}
+
+export function getSqlxMigrationLockId(databaseName: string): bigint {
+  return SQLX_LOCK_MULTIPLIER * BigInt(crc32IsoHdlc(databaseName));
+}
+
+export async function getSqlxMigrationLockConfig(): Promise<SqlxMigrationLockConfig> {
+  const { rows } = await pool.query<{ current_database: string }>("SELECT current_database()");
+  const databaseName = rows[0].current_database;
+  const lockId = getSqlxMigrationLockId(databaseName);
+  const unsignedLockId = BigInt.asUintN(64, lockId);
+
+  return {
+    databaseName,
+    lockId: lockId.toString(),
+    lockKeyClassId: (unsignedLockId >> 32n).toString(),
+    lockKeyObjId: (unsignedLockId & 0xffffffffn).toString(),
+    probeConcurrency: SQLX_MIGRATION_LOCK_PROBE_CONCURRENCY,
+    lockTimeoutMs: SQLX_MIGRATION_LOCK_TIMEOUT_MS,
+    statementTimeoutMs: SQLX_MIGRATION_STATEMENT_TIMEOUT_MS,
+  };
+}
+
 // ---------------------------------------------------------------------------
 // Build the pool with resilient options
 // ---------------------------------------------------------------------------
