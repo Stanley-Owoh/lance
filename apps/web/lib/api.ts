@@ -5,12 +5,10 @@ import { useAuthStore } from "./store/use-auth-store";
 import type { ReputationMetrics } from "./reputation";
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
-  const token = useAuthStore.getState().user?.token;
-  
   const res = await fetch(`${API}/api${path}`, {
+    credentials: "include",
     headers: {
       "Content-Type": "application/json",
-      ...(token ? { "Authorization": `Bearer ${token}` } : {}),
       ...(init?.headers ?? {}),
     },
     ...init,
@@ -248,9 +246,10 @@ export interface AuthChallengeResponse {
 }
 
 export interface AuthVerifyResponse {
-  token: string;
-  expires_at: string;
-  user_address: string;
+  access_token: string;
+  refresh_token: string;
+  token_type: string;
+  expires_in: number;
 }
 
 export interface MetadataUploadResponse {

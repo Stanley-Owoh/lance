@@ -1,5 +1,6 @@
 import express, { Express, Request, Response } from "express";
 import cors from "cors";
+import cookieParser from "cookie-parser";
 import dotenv from "dotenv";
 import { prisma, connectWithRetry, startPoolHealthCheck } from "./config/db";
 import { trace } from "./config/tracing";
@@ -26,8 +27,13 @@ const app: Express = express();
 const port = process.env.PORT || 3001;
 const logger = trace.getLogger("server");
 
-// Enable CORS for frontend requests
-app.use(cors({ origin: "*" }));
+// Enable CORS for frontend requests with credentials support
+const FRONTEND_URL = process.env.FRONTEND_URL || "http://localhost:3000";
+app.use(cors({
+  origin: FRONTEND_URL,
+  credentials: true,
+}));
+app.use(cookieParser());
 app.use(express.json());
 app.use(tracingMiddleware); // Global request tracing and diagnostics
 app.use(intakeRateLimit);
